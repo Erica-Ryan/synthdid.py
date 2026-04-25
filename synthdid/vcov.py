@@ -86,6 +86,93 @@ def bootstrap_se(data_ref, n_reps = 50):
     se_bootstrap = np.sqrt(1 / n_reps * np.sum((att_bt - np.sum(att_bt / n_reps)) ** 2))
     return se_bootstrap
 
+def placebo_se_weighted(data_ref, treated_weights, n_reps=50, placebo_weights="uniform"):
+    """
+    Weighted placebo SE (Algorithm 4 adapted for treated weights)
+    """
+    tr_years = data_ref.query("time == tyear and tyear != 0").time
+    N_tr = len(tr_years)
+
+    df_co = data_ref.query("treated == 0")
+    control_units = np.unique(df_co.unit)
+
+    if len(control_units) <= N_tr:
+        raise ValueError("Must have more control units than treated units")
+
+    treated_weights = np.array(treated_weights)
+
+    def draw_placebo_weights(sampled_units):
+        if placebo_weights == "uniform":
+            return np.full(N_tr, 1 / N_tr)
+
+        elif placebo_weights == "permute":
+            return np.random.permutation(treated_weights)[:N_tr]
+
+        elif placebo_weights == "size_match":
+            # weight by pre-treatment outcome means
+            pre = data_ref[data_ref.time < data_ref.tyear]
+            means = []
+            for u in sampled_units:
+                vals = pre[pre.unit == u].outcome
+                means.append(np.abs(vals.mean()) if len(vals) > 0 else 0)
+            w = np.array(means)
+            if w.sum() == 0:
+                return np.full(N_tr, 1 / N_tr)
+            return w / w.sum()
+
+        else:
+            raise ValueError("Invalid placebo_weights option")
+
+    def theta_pb():
+        sampled_units = np.random.choice(control_units, size=N_tr, replace=False)
+
+        placebo_years = pd.DataFrame({
+            "unit": sampled_units,
+            "tyear1": tr_years
+        })
+
+        aux_data = df_co.merge(placebo_years, on="unit", how='outer')
+        aux_data = aux_data.assign(
+            tyear=aux_data.tyear1.fillna(aux_data["tyear"])
+        )
+
+        aux_data = aux_data.assign(
+            treatment=np.where(
+                ((aux_data.tyear != 0) & (aux_data.time == aux_data.tyear)),
+                1, 0
+            )
+        ).reset_index(drop=True)
+
+        aux_data["treated"] = aux_data.groupby("unit")["treatment"].transform("max")
+
+        tw = draw_placebo_weights(sampled_units)
+
+        return sdid(
+            aux_data,
+            "unit",
+            "time",
+            "treatment",
+            "outcome",
+            treated_weights=tw
+        )["att"]
+
+    atts = []
+    attempts = 0
+    max_attempts = n_reps * 10
+
+    while len(atts) < n_reps and attempts < max_attempts:
+        attempts += 1
+        try:
+            atts.append(theta_pb())
+        except Exception:
+            continue
+
+    if len(atts) < n_reps:
+        print(f"Warning: only {len(atts)} successful placebo reps")
+
+    atts = np.array(atts)
+    return np.sqrt(np.var(atts, ddof=0))
+    
 def placebo_se(data_ref, n_reps=50):
     tr_years = data_ref.query("time == tyear and tyear != 0").time
     N_tr = len(tr_years)
@@ -206,7 +293,14 @@ class Variance:
     def vcov(self, method="placebo", n_reps=50):
         data_ref = self.data_ref
         if method=="placebo":
-            se = placebo_se(data_ref, n_reps=n_reps)
+            if self.treated_weights is not None:
+                se = placebo_se_weighted(
+                    data_ref,
+                    self.treated_weights,
+                    n_reps=n_reps
+                )
+            else:
+                se = placebo_se(data_ref, n_reps=n_reps)
         elif method=="bootstrap":
             se = bootstrap_se(data_ref, n_reps=n_reps)
         else:  # jackknife
