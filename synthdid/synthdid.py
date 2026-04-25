@@ -9,11 +9,13 @@ from synthdid.plots import Plots
 from synthdid.summary import Summary
 
 class Synthdid(SDID, Variance, Plots, Summary):
-	def __init__(self, data, unit="unit", time = "time", treatment="treatment", outcome="outcome", covariates = None):
+	def __init__(self, data, unit="unit", time = "time", treatment="treatment", outcome="outcome", covariates = None, treated_weights=None, cluster=None):
 		self.data = data
 		self.unit, self.time = unit, time
 		self.treatment, self.outcome = treatment, outcome
 		self.covariates = covariates
+		self.treated_weights = treated_weights
+		self.cluster = cluster
 		self.se = None
 		self.data_ref, self.ttime = panel_matrices(data, unit, time, treatment, outcome, covariates=covariates)
 		# if covariates is not None:
