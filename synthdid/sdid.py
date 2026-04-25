@@ -8,7 +8,7 @@ from .solver import fw_step, sc_weight_fw, sc_weight_covariates
 # data_ref: treated => tunit
 
 def sdid(data: pd.DataFrame, unit, time, treatment, outcome, covariates=None, 
-         cov_method="optimized", noise_level=None, eta_omega=None, eta_lambda=1e-6, zeta_omega=None, zeta_lambda=None, omega_intercept=True, lambda_intercept=True, min_decrease=None, max_iter=10000, sparsify=sparsify_function, max_iter_pre_sparsify=100, lambda_estimate=None, omega_estimate=None,synth=False,did=False
+         cov_method="optimized", noise_level=None, eta_omega=None, eta_lambda=1e-6, zeta_omega=None, zeta_lambda=None, omega_intercept=True, lambda_intercept=True, min_decrease=None, max_iter=10000, sparsify=sparsify_function, max_iter_pre_sparsify=100, lambda_estimate=None, omega_estimate=None,synth=False,did=False,treated_weights=None
 		):
 	tdf, ttime = panel_matrices(data, unit, time, treatment, outcome, covariates)
 	beta_covariate = []
@@ -41,6 +41,12 @@ def sdid(data: pd.DataFrame, unit, time, treatment, outcome, covariates=None,
 		T1s.append(T1)
 		Yc = collapse_form(Y, N0, T0)
 
+		if treated_weights is not None:
+		    tw = np.array(treated_weights)
+		    tw = tw / tw.sum()  # normalize to be safe
+		    Yc.iloc[N0, :T0] = Y.iloc[N0:, :T0].T @ tw
+		    Yc.iloc[N0, T0]  = Y.iloc[N0:, T0:].mean(axis=1) @ tw
+
 		prediff = Y.iloc[:N0, :T0].apply(lambda x: x.diff(), axis=1).iloc[:, 1:]
 		noise_level = np.sqrt(varianza(np.array(prediff).flatten()))
 
@@ -66,7 +72,8 @@ def sdid(data: pd.DataFrame, unit, time, treatment, outcome, covariates=None,
 
 			
 
-			omg = np.concatenate(([-omega_est, np.full(N1, 1/N1)]))
+			tw = np.array(treated_weights) / np.array(treated_weights).sum() if treated_weights is not None else np.full(N1, 1/N1)
+			omg = np.concatenate(([-omega_est, tw]))
 			lmd = np.concatenate(([-lambda_est, np.full(T1, 1/T1)]))
 
 			tau_hat[i] = np.dot(omg, Y) @ lmd
@@ -88,7 +95,8 @@ def sdid(data: pd.DataFrame, unit, time, treatment, outcome, covariates=None,
 			beta_est = weigths["beta"]
 			beta_covariate.append(beta_est[0])
 
-			omg = np.concatenate(([-omega_est, np.full(N1, 1/N1)]))
+			tw = np.array(treated_weights) / np.array(treated_weights).sum() if treated_weights is not None else np.full(N1, 1/N1)
+			omg = np.concatenate(([-omega_est, tw]))
 			lmd = np.concatenate(([-lambda_est, np.full(T1, 1/T1)]))
 
 			y_beta = Y - np.sum(np.multiply(X, beta_est[:, np.newaxis, np.newaxis]), axis = 0)
@@ -126,13 +134,14 @@ def sdid(data: pd.DataFrame, unit, time, treatment, outcome, covariates=None,
 
 class SDID:
 	def fit(self,# data: pd.DataFrame, unit, time, treatment, outcome, covariates=None, 
-			cov_method="optimized", noise_level=None, eta_omega=None, eta_lambda=1e-6, zeta_omega=None, zeta_lambda=None, omega_intercept=True, lambda_intercept=True, min_decrease=None, max_iter=10000, sparsify=sparsify_function, max_iter_pre_sparsify=100, lambda_estimate=None, omega_estimate=None,synth=False,did=False
+			cov_method="optimized", noise_level=None, eta_omega=None, eta_lambda=1e-6, zeta_omega=None, zeta_lambda=None, omega_intercept=True, lambda_intercept=True, min_decrease=None, max_iter=10000, sparsify=sparsify_function, max_iter_pre_sparsify=100, lambda_estimate=None, omega_estimate=None,synth=False,did=False,treated_weights=None
 			):
 	# tdf, ttime = panel_matrices(data, unit, time, treatment, outcome, covariates)
 		tdf, ttime, covariates = self.data_ref, self.ttime, self.covariates
 		if (covariates is not None) and (cov_method == "projected"):
 			tdf, _, _ = projected(tdf, 'outcome', 'unit', 'time', covariates)
-		
+
+		treated_weights = self.treated_weights
 		T_total = 0
 		break_points = len(ttime)
 		tau_hat, tau_hat_wt = np.zeros(break_points), np.zeros(break_points)
@@ -159,6 +168,11 @@ class SDID:
 			N1s.append(N1)
 			T1s.append(T1)
 			Yc = collapse_form(Y, N0, T0)
+			if treated_weights is not None:
+			    tw = np.array(treated_weights)
+			    tw = tw / tw.sum()  # normalize to be safe
+			    Yc.iloc[N0, :T0] = Y.iloc[N0:, :T0].T @ tw
+			    Yc.iloc[N0, T0]  = Y.iloc[N0:, T0:].mean(axis=1) @ tw
 
 			prediff = Y.iloc[:N0, :T0].apply(lambda x: x.diff(), axis=1).iloc[:, 1:]
 			noise_level = np.sqrt(varianza(np.array(prediff).flatten()))
