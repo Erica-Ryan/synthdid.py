@@ -21,7 +21,7 @@ setup(
         "kiwisolver==1.4.4",
         "matplotlib==3.7.1",
         "numpy==1.23.5",
-        "packaging==23.0",
+        "packaging>=23.0",
         "pandas==1.5.3",
         "patsy==0.5.3",
         "pillow==9.4.0",
