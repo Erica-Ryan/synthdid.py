@@ -1,8 +1,11 @@
 import pandas as pd
 import numpy as np
+import os
+from synthdid.sdid import sdid
+from synthdid.vcov import jackknife_se, bootstrap_se_weighted
 
 # Load data
-panel = pd.read_csv("../data/analysis_data.csv")
+panel = pd.read_csv("data/analysis_data.csv")
 
 panel = panel.rename(columns={
     "fips": "unit",
@@ -23,7 +26,7 @@ n_control = panel.loc[panel["treated_unit"] == 0, "unit"].nunique()
 year_range = (panel["time"].min(), panel["time"].max())
 n_years = panel["time"].nunique()
 
-T0 = sum(sorted(panel["time"].unique()) < 2014)
+T0 = (np.sort(panel["time"].unique()) < 2014).sum()
 T1 = n_years - T0
 
 panel_sdid = (
@@ -70,45 +73,49 @@ data_ref["cluster"] = data_ref["unit"].map(cluster_map)
 
 n_states = data_ref["cluster"].nunique()
 
-tau_sdid = sdid(
+result_sdid = sdid(
     data_ref,
     unit="unit",
     time="time",
     treatment="treatment",
     outcome="outcome"
-)["att"]
+)
+tau_sdid = result_sdid["att"]
 
-tau_sdid_w = sdid(
-    data_ref,
-    unit="unit",
-    time="time",
-    treatment="treatment",
-    outcome="outcome",
-    treated_weights=treated_weights
-)["att"]
+# result_sdid_w = sdid(
+#     data_ref,
+#     unit="unit",
+#     time="time",
+#     treatment="treatment",
+#     outcome="outcome",
+#     treated_weights=treated_weights
+# )
+# tau_sdid_w = result_sdid_w["att"]
 
 se_sdid = jackknife_se(
     data_ref,
     time_breaks=sorted(data_ref.loc[data_ref["tyear"] > 0, "tyear"].unique()),
     att=tau_sdid,
-    weights=None
+    weights=result_sdid["weights"]
 )
 
-se_sdid_w = bootstrap_se_weighted(
-    data_ref,
-    treated_weights=treated_weights,
-    cluster="cluster",
-    n_reps=200
-)
+#jackknife_se_weighted(data_ref,time_breaks,att,weights,treated_weights=None):
 
-results = pd.DataFrame({
-    "Estimator": ["SDID"],
-    "Equally weighted": [tau_sdid],
-    "SE (eq.)": [se_sdid],
-    "Population weighted": [tau_sdid_w],
-    "SE (wt.)": [se_sdid_w]
-})
+# se_sdid_w = bootstrap_se_weighted(
+#     data_ref,
+#     treated_weights=treated_weights,
+#     cluster="cluster",
+#     n_reps=200
+# )
 
-print(results.round(2))
+# results = pd.DataFrame({
+#     "Estimator": ["SDID"],
+#     "Equally weighted": [tau_sdid],
+#     "SE (eq.)": [se_sdid],
+#     "Population weighted": [tau_sdid_w],
+#     "SE (wt.)": [se_sdid_w]
+# })
 
-assert len(treated_weights) == data_ref.loc[data_ref["treated"] == 1, "unit"].nunique()
+# print(results.round(2))
+
+# assert len(treated_weights) == data_ref.loc[data_ref["treated"] == 1, "unit"].nunique()

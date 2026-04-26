@@ -42,10 +42,10 @@ def sdid(data: pd.DataFrame, unit, time, treatment, outcome, covariates=None,
 		Yc = collapse_form(Y, N0, T0)
 
 		if treated_weights is not None:
-		    tw = np.array(treated_weights)
-		    tw = tw / tw.sum()  # normalize to be safe
-		    Yc.iloc[N0, :T0] = Y.iloc[N0:, :T0].T @ tw
-		    Yc.iloc[N0, T0]  = Y.iloc[N0:, T0:].mean(axis=1) @ tw
+			tw = np.array(treated_weights)[:N1]  # slice to actual N1 in this sample
+			tw = tw / tw.sum()  # renormalize
+			Yc.iloc[N0, :T0] = Y.iloc[N0:, :T0].T @ tw
+			Yc.iloc[N0, T0]  = Y.iloc[N0:, T0:].mean(axis=1) @ tw
 
 		prediff = Y.iloc[:N0, :T0].apply(lambda x: x.diff(), axis=1).iloc[:, 1:]
 		noise_level = np.sqrt(varianza(np.array(prediff).flatten()))
@@ -72,7 +72,8 @@ def sdid(data: pd.DataFrame, unit, time, treatment, outcome, covariates=None,
 
 			
 
-			tw = np.array(treated_weights) / np.array(treated_weights).sum() if treated_weights is not None else np.full(N1, 1/N1)
+			tw = np.array(treated_weights)[:N1] if treated_weights is not None else np.full(N1, 1/N1)
+			tw = tw / tw.sum() if treated_weights is not None else tw
 			omg = np.concatenate(([-omega_est, tw]))
 			lmd = np.concatenate(([-lambda_est, np.full(T1, 1/T1)]))
 
@@ -95,7 +96,8 @@ def sdid(data: pd.DataFrame, unit, time, treatment, outcome, covariates=None,
 			beta_est = weigths["beta"]
 			beta_covariate.append(beta_est[0])
 
-			tw = np.array(treated_weights) / np.array(treated_weights).sum() if treated_weights is not None else np.full(N1, 1/N1)
+			tw = np.array(treated_weights)[:N1] if treated_weights is not None else np.full(N1, 1/N1)
+			tw = tw / tw.sum() if treated_weights is not None else tw
 			omg = np.concatenate(([-omega_est, tw]))
 			lmd = np.concatenate(([-lambda_est, np.full(T1, 1/T1)]))
 

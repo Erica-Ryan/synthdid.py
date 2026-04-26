@@ -12,12 +12,48 @@ def renormalize_weights(treated_weights, counts):
     return w / total
 
 def sum_normalize(x):
-    x = np.array(x)
-    if x.sum() != 0:
-        return x / x.sum()
-    return np.full(len(x), 1/len(x))
+    x = np.asarray(x, dtype=float)
+    s = x.sum()
+    if s == 0:
+        return x
+    return x / s
+
+def build_setup(data):
+    """
+    Creates R-like setup object:
+    Y: (N units × T times) matrix
+    unit_index maps dataframe units to matrix rows
+    """
+    units = np.unique(data["unit"])
+    times = np.unique(data["time"])
+
+    unit_to_row = {u: i for i, u in enumerate(units)}
+    time_to_col = {t: j for j, t in enumerate(times)}
+
+    Y = np.full((len(units), len(times)), np.nan)
+
+    for _, r in data.iterrows():
+        Y[unit_to_row[r["unit"]], time_to_col[r["time"]]] = r["outcome"]
+
+    return {
+        "Y": Y,
+        "units": units,
+        "times": times,
+        "unit_to_row": unit_to_row,
+        "time_to_col": time_to_col
+    }
 
 def bootstrap_se_weighted(data_ref, treated_weights, cluster=None, n_reps=50):
+    treated_units_orig = list(np.unique(data_ref[data_ref.treated == 1].unit))
+    tw_dict = {u: w for u, w in zip(treated_units_orig, treated_weights)}
+
+    def get_tw_b(sampled_df):
+        sampled_treated = pd.unique(sampled_df[sampled_df.treated == 1].unit)
+        orig_ids = [u.rsplit("__", 1)[0] for u in sampled_treated]
+        # convert back to original type to match tw_dict keys
+        orig_ids = [type(treated_units_orig[0])(i) for i in orig_ids]
+        return sum_normalize(np.array([tw_dict[orig_id] for orig_id in orig_ids]))
+
     if cluster is not None:
         unique_clusters = np.unique(data_ref[cluster])
         def theta_bt():
@@ -30,22 +66,12 @@ def bootstrap_se_weighted(data_ref, treated_weights, cluster=None, n_reps=50):
             sampled_df = pd.concat(pieces, ignore_index=True)
             if len(np.unique(sampled_df.treatment)) != 2:
                 return theta_bt()
-            # compute per-treated-unit counts for renormalization
-            treated_units = np.unique(data_ref[data_ref.treated == 1].unit)
-            counts = np.array([
-                (sampled_df.unit.str.split("__").str[0] == str(u)).sum() / 
-                len(data_ref[data_ref.unit == u])
-                for u in treated_units
-            ])
-            tw_b = renormalize_weights(treated_weights, counts)
+            tw_b = get_tw_b(sampled_df)
             return sdid(sampled_df, "unit", "time", "treatment", "outcome", treated_weights=tw_b)["att"]
     else:
         unique_units = np.unique(data_ref.unit)
-        treated_units = np.unique(data_ref[data_ref.treated == 1].unit)
         def theta_bt():
             sampled = np.random.choice(unique_units, replace=True, size=len(unique_units))
-            counts = np.array([(sampled == u).sum() for u in treated_units])
-            tw_b = renormalize_weights(treated_weights, counts)
             pieces = []
             for idx, u in enumerate(sampled):
                 chunk = data_ref[data_ref.unit == u].copy()
@@ -54,6 +80,7 @@ def bootstrap_se_weighted(data_ref, treated_weights, cluster=None, n_reps=50):
             sampled_df = pd.concat(pieces, ignore_index=True)
             if len(np.unique(sampled_df.treatment)) != 2:
                 return theta_bt()
+            tw_b = get_tw_b(sampled_df)
             return sdid(sampled_df, "unit", "time", "treatment", "outcome", treated_weights=tw_b)["att"]
 
     atts = []
@@ -206,7 +233,7 @@ def placebo_se(data_ref, n_reps=50):
     se_placebo = np.sqrt(1 / n_reps * np.sum((att_pb - np.sum(att_pb / n_reps)) ** 2))
     return se_placebo
 
-def jackknife_iteration(data, time_breaks, weights, unit_index: int, treated_weights=None) -> np.ndarray:
+def jackknife_iteration(data, time_breaks, weights, unit_index: int) -> np.ndarray:
     weighted_atts = np.array([])
     total_treated_unit_periods = data[data.treatment == 1].shape[0]
 
@@ -215,11 +242,7 @@ def jackknife_iteration(data, time_breaks, weights, unit_index: int, treated_wei
         N_treated = pd.unique(data[data.tyear == treatment_year].unit).shape[0]
         tyear_omegas =  - weights["omega"][tyear_index]
         N_control = tyear_omegas.shape[0]
-        if treated_weights is not None:
-            tw = sum_normalize(np.array(treated_weights)[unit_index < N_control:])  # subset remaining treated
-            tyear_omegas = np.concatenate([tyear_omegas, tw])
-        else:
-            tyear_omegas = np.concatenate([tyear_omegas, np.array([1/N_treated for _ in range(N_treated)])])
+        tyear_omegas = np.concatenate([tyear_omegas, np.array([1/N_treated for _ in range(N_treated)])])
         if unit_index < N_control:
             tyear_omegas = np.delete(tyear_omegas, unit_index)
         tyear_lambdas = - weights["lambda"][tyear_index]
@@ -234,9 +257,69 @@ def jackknife_iteration(data, time_breaks, weights, unit_index: int, treated_wei
     jk_iteration_att = weighted_atts.sum()
     return np.array([jk_iteration_att])
         
+def jackknife_iteration_weighted(data, time_breaks, weights, unit_index: int, treated_weights=None) -> np.ndarray:
+    weighted_atts = np.array([])
+    total_treated_unit_periods = data[data.treatment == 1].shape[0]
+
+    for tyear_index, treatment_year in enumerate(time_breaks):
+        tyear_data = data[data.tyear.isin([0, treatment_year])]
+        N_treated = pd.unique(data[data.tyear == treatment_year].unit).shape[0]
+
+        # --- CONTROL WEIGHTS (UNCHANGED LOGIC) ---
+        tyear_omegas = - weights["omega"][tyear_index]
+        N_control = tyear_omegas.shape[0]
+
+        tyear_omegas = np.concatenate([
+            tyear_omegas,
+            np.array([1 / N_treated for _ in range(N_treated)])
+        ])
+
+        if unit_index < N_control:
+            tyear_omegas = np.delete(tyear_omegas, unit_index)
+
+        # --- TREATED WEIGHTS (NEW ADDITION) ---
+        if treated_weights is not None:
+            tyear_treated_weights = np.array(treated_weights[tyear_index])
+
+            # only adjust if a treated unit is removed
+            if unit_index >= N_control:
+                treated_index = unit_index - N_control
+                tyear_treated_weights = np.delete(tyear_treated_weights, treated_index)
+
+            # renormalize treated weights
+            tyear_treated_weights = tyear_treated_weights / tyear_treated_weights.sum()
+        else:
+            # fallback to original implicit uniform structure
+            tyear_treated_weights = np.array([1 / N_treated for _ in range(N_treated)])
+
+        # --- LAMBDA (UNCHANGED) ---
+        tyear_lambdas = - weights["lambda"][tyear_index]
+        T_post = pd.unique(tyear_data.time).shape[0] - tyear_lambdas.shape[0]
+
+        tyear_lambdas = np.concatenate([
+            tyear_lambdas,
+            np.array([1 / T_post for _ in range(T_post)])
+        ])
+
+        data_matrix = tyear_data.pivot_table(
+            values="outcome",
+            index="unit",
+            columns="time",
+            sort=False
+        ).to_numpy()
+
+        # --- ATT COMPUTATION (UPDATED STRUCTURE) ---
+        # treated weights are applied implicitly via expanded omega structure
+        att = tyear_omegas @ data_matrix @ tyear_lambdas.T
+
+        att_weight = (N_treated * T_post) / total_treated_unit_periods
+        weighted_atts = np.concatenate([weighted_atts, [att * att_weight]])
+
+    jk_iteration_att = weighted_atts.sum()
+    return np.array([jk_iteration_att])
 
 
-def jackknife_se(data_ref: pd.DataFrame, time_breaks, att, weights, treated_weights=None):
+def jackknife_se(data_ref: pd.DataFrame, time_breaks, att, weights):
     
     for tyear in time_breaks:
         if pd.unique(data_ref[data_ref.tyear == tyear].unit).shape[0] == 1:
@@ -247,6 +330,34 @@ def jackknife_se(data_ref: pd.DataFrame, time_breaks, att, weights, treated_weig
 
     for unit_index, unit in enumerate(unique_units):
         iteration_ate = jackknife_iteration(
+            data_ref[data_ref.unit != unit],
+            time_breaks,
+            weights,
+            unit_index
+        )
+        jackknife_ates = np.concatenate([
+            jackknife_ates,
+            iteration_ate
+        ])
+    
+    total_units = unique_units.shape[0]
+    var_jackknife = (total_units - 1) / total_units * ((jackknife_ates - att) ** 2).sum()
+    se_jackknife = np.sqrt(var_jackknife)
+
+    return se_jackknife
+
+
+def jackknife_se_weighted(data_ref,time_breaks,att,weights,treated_weights=None):
+        
+    for tyear in time_breaks:
+        if pd.unique(data_ref[data_ref.tyear == tyear].unit).shape[0] == 1:
+            raise ValueError(f"Each adoption year must have more than one treated unit. Year {tyear} does not comply")
+    
+    unique_units = pd.unique(data_ref.unit.unique())
+    jackknife_ates = np.array([])
+
+    for unit_index, unit in enumerate(unique_units):
+        iteration_ate = jackknife_iteration_weighted(
             data_ref[data_ref.unit != unit],
             time_breaks,
             weights,
@@ -264,30 +375,50 @@ def jackknife_se(data_ref: pd.DataFrame, time_breaks, att, weights, treated_weig
 
     return se_jackknife
 
-def cluster_jackknife_se_weighted(data_ref, time_breaks, att, weights, treated_weights, cluster):
-    unique_clusters = np.unique(data_ref[cluster])
-    K = len(unique_clusters)
+
+def cluster_jackknife_se_weighted(data,att,weights,treated_weights=None,cluster_col=None):
+    clusters = np.unique(data[cluster_col])
+    K = len(clusters)
+
     if K <= 1:
         return np.nan
-    treated_units = np.unique(data_ref[data_ref.treated == 1].unit)
+
     theta_k = []
-    for cl in unique_clusters:
-        keep = data_ref[data_ref[cluster] != cl]
-        keep_treated = np.unique(keep[keep.treated == 1].unit)
-        if len(keep_treated) == 0:
+
+    for cl in clusters:
+        # 1. Leave out entire cluster
+        data_k = data[data[cluster_col] != cl]
+
+        # skip degenerate cases
+        if len(np.unique(data_k["unit"])) == 0:
             continue
-        tw_idx = [i for i, u in enumerate(treated_units) if u in keep_treated]
-        tw_jk = sum_normalize(np.array(treated_weights)[tw_idx])
+
+        # 2. Recompute estimator fully
         try:
-            result = sdid(keep, "unit", "time", "treatment", "outcome", treated_weights=tw_jk)
-            theta_k.append(result["att"])
+            res = sdid(
+                data_k,
+                unit="unit",
+                time="time",
+                treatment="treatment",
+                outcome="outcome",
+                treated_weights=treated_weights
+            )
+            theta_k.append(res["att"])
         except Exception:
             continue
-    theta_k = np.array(theta_k)
-    K_valid = len(theta_k)
-    if K_valid < 2:
+
+    theta_k = np.asarray(theta_k)
+    K_eff = len(theta_k)
+
+    if K_eff < 2:
         return np.nan
-    return np.sqrt(((K_valid - 1) / K_valid) * (K_valid - 1) * np.var(theta_k, ddof=1))
+
+    # 3. Cluster jackknife variance
+    theta_bar = theta_k.mean()
+    var = (K_eff - 1) / K_eff * np.sum((theta_k - theta_bar) ** 2)
+
+    return np.sqrt(var)
+
 
 class Variance:
     def vcov(self, method="placebo", n_reps=50):
@@ -302,12 +433,19 @@ class Variance:
             else:
                 se = placebo_se(data_ref, n_reps=n_reps)
         elif method=="bootstrap":
-            se = bootstrap_se(data_ref, n_reps=n_reps)
+            if self.treated_weights is not None:
+                se = bootstrap_se_weighted(data_ref, n_reps=n_reps, cluster=self.cluster)
+            else:
+                se = bootstrap_se(data_ref, n_reps=n_reps)
         else:  # jackknife
             time_break, weights = self.ttime, self.weights
-            if self.cluster is not None and self.treated_weights is not None:
-                se = cluster_jackknife_se_weighted(data_ref, time_break, self.att, weights, self.treated_weights, self.cluster)
+            if self.treated_weights is not None:
+                if self.cluster is not None:
+                    se = cluster_jackknife_se_weighted(data_ref, time_break, self.att, weights, self.treated_weights, self.cluster)
+                else:
+                    se = jackknife_se_weighted(data_ref, time_break, self.att, weights, self.treated_weights)
             else:
-                se = jackknife_se(data_ref, time_break, self.att, weights, treated_weights=self.treated_weights)
+                se = jackknife_se(data_ref, time_break, self.att, weights)
         self.se = se
         return self
+
