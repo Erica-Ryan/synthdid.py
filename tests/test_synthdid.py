@@ -471,3 +471,99 @@ class TestEdgeCases:
         assert m.se > 0
         m.vcov(method="placebo", n_reps=200)
         assert m.se > 0
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. WEIGHTED ESTIMATOR
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestWeighted:
+    """Smoke tests for treated_weights support."""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def model(self, df_california):
+        df = df_california.copy()
+        # California has 1 treated unit so weights are trivial (scalar 1.0)
+        # Use quota data instead for a multi-treated test
+        pass
+
+    @pytest.fixture(scope="class")
+    def weighted_california(self, df_california):
+        return (
+            Synthdid(df_california, "State", "Year", "treated", "PacksPerCapita",
+                     treated_weights=np.array([1.0]))
+            .fit()
+        )
+
+    @pytest.fixture(scope="class")
+    def weighted_quota(self, df_quota):
+        # Fabricate population weights for treated units at each adoption year
+        np.random.seed(42)
+        m_unweighted = Synthdid(df_quota, "country", "year", "quota", "womparl").fit()
+        n_treated_total = sum(m_unweighted.att_info["N1"])
+        weights = np.ones(n_treated_total)
+        weights[0] = 5.0  # give first treated unit more weight
+        weights = weights / weights.sum()
+        return (
+            Synthdid(df_quota, "country", "year", "quota", "womparl",
+                     treated_weights=weights)
+            .fit()
+        )
+
+    def test_california_weighted_att_finite(self, weighted_california):
+        assert np.isfinite(weighted_california.att)
+
+    def test_california_weighted_att_close_to_unweighted(self, df_california, weighted_california):
+        """Single treated unit: weighted == unweighted."""
+        m_uw = Synthdid(df_california, "State", "Year", "treated", "PacksPerCapita").fit()
+        assert abs(weighted_california.att - m_uw.att) < 1e-6
+
+    def test_quota_weighted_att_finite(self, weighted_quota):
+        assert np.isfinite(weighted_quota.att)
+
+    def test_quota_weighted_att_differs_from_unweighted(self, df_quota, weighted_quota):
+        """Non-uniform weights should produce a different ATT."""
+        m_uw = Synthdid(df_quota, "country", "year", "quota", "womparl").fit()
+        assert abs(weighted_quota.att - m_uw.att) > 1e-6
+
+    def test_weighted_omega_sums_to_one(self, weighted_quota):
+        for om in weighted_quota.weights["omega"]:
+            assert abs(np.sum(om) - 1.0) < 1e-6
+
+    def test_weighted_lambda_sums_to_one(self, weighted_quota):
+        for lm in weighted_quota.weights["lambda"]:
+            assert abs(np.sum(lm) - 1.0) < 1e-6
+
+    def test_jackknife_se_weighted_positive(self, weighted_quota):
+        weighted_quota.vcov(method="jackknife")
+        assert weighted_quota.se > 0
+        assert np.isfinite(weighted_quota.se)
+
+    def test_bootstrap_se_weighted_positive(self, df_quota):
+        np.random.seed(0)
+        weights = np.ones(sum(
+            Synthdid(df_quota, "country", "year", "quota", "womparl").fit().att_info["N1"]
+        ))
+        weights = weights / weights.sum()
+        m = (
+            Synthdid(df_quota, "country", "year", "quota", "womparl",
+                     treated_weights=weights)
+            .fit()
+            .vcov(method="bootstrap", n_reps=20)
+        )
+        assert m.se > 0
+        assert np.isfinite(m.se)
+
+    def test_placebo_se_weighted_positive(self, df_quota):
+        np.random.seed(0)
+        weights = np.ones(sum(
+            Synthdid(df_quota, "country", "year", "quota", "womparl").fit().att_info["N1"]
+        ))
+        weights = weights / weights.sum()
+        m = (
+            Synthdid(df_quota, "country", "year", "quota", "womparl",
+                     treated_weights=weights)
+            .fit()
+            .vcov(method="placebo", n_reps=20)
+        )
+        assert m.se > 0
+        assert np.isfinite(m.se)

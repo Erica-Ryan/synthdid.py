@@ -1,5 +1,5 @@
 import numpy as np, pandas as pd
-from .utils import panel_matrices, collapse_form, varianza, sparsify_function, projected
+from .utils import panel_matrices, collapse_form, collapse_form_weighted, varianza, sparsify_function, projected
 from .solver import fw_step, sc_weight_fw, sc_weight_covariates
 
 
@@ -39,13 +39,7 @@ def sdid(data: pd.DataFrame, unit, time, treatment, outcome, covariates=None,
 		T0s.append(T0)
 		N1s.append(N1)
 		T1s.append(T1)
-		Yc = collapse_form(Y, N0, T0)
-
-		if treated_weights is not None:
-			tw = np.array(treated_weights)[:N1]  # slice to actual N1 in this sample
-			tw = tw / tw.sum()  # renormalize
-			Yc.iloc[N0, :T0] = Y.iloc[N0:, :T0].T @ tw
-			Yc.iloc[N0, T0]  = Y.iloc[N0:, T0:].mean(axis=1) @ tw
+		Yc = collapse_form_weighted(Y, N0, T0, treated_weights=treated_weights)
 
 		prediff = Y.iloc[:N0, :T0].apply(lambda x: x.diff(), axis=1).iloc[:, 1:]
 		noise_level = np.sqrt(varianza(np.array(prediff).flatten()))
@@ -169,12 +163,7 @@ class SDID:
 			T0s.append(T0)
 			N1s.append(N1)
 			T1s.append(T1)
-			Yc = collapse_form(Y, N0, T0)
-			if treated_weights is not None:
-			    tw = np.array(treated_weights)
-			    tw = tw / tw.sum()  # normalize to be safe
-			    Yc.iloc[N0, :T0] = Y.iloc[N0:, :T0].T @ tw
-			    Yc.iloc[N0, T0]  = Y.iloc[N0:, T0:].mean(axis=1) @ tw
+			Yc = collapse_form_weighted(Y, N0, T0, treated_weights=treated_weights)
 
 			prediff = Y.iloc[:N0, :T0].apply(lambda x: x.diff(), axis=1).iloc[:, 1:]
 			noise_level = np.sqrt(varianza(np.array(prediff).flatten()))

@@ -95,3 +95,36 @@ def varianza(x):
 	n = len(x)
 	media = sum(x) / n
 	return sum((xi - media) ** 2 for xi in x) / (n - 1)
+
+def collapse_form_weighted(Y, N0, T0, treated_weights=None, period_weights=None):
+    N, T = Y.shape
+    N1 = N - N0
+    T1 = T - T0
+    Y = pd.DataFrame(Y)
+
+    if treated_weights is None:
+        treated_weights = np.full(N1, 1/N1)
+    else:
+        treated_weights = np.array(treated_weights)
+        treated_weights = treated_weights / treated_weights.sum()
+
+    if period_weights is None:
+        period_weights = np.full(T1, 1/T1)
+    else:
+        period_weights = np.array(period_weights)
+        period_weights = period_weights / period_weights.sum()
+
+    Y_control_pre  = Y.iloc[:N0, :T0]
+    Y_control_post = Y.iloc[:N0, T0:]
+    Y_treated_pre  = Y.iloc[N0:, :T0]
+    Y_treated_post = Y.iloc[N0:, T0:]
+
+    control_post_collapsed = Y_control_post.values @ period_weights      # N0 x 1
+    treated_pre_collapsed  = Y_treated_pre.values.T @ treated_weights    # T0 x 1
+    treated_post_collapsed = treated_weights @ Y_treated_post.values @ period_weights  # scalar
+
+    result_top = pd.concat([Y_control_pre, pd.Series(control_post_collapsed, index=Y_control_pre.index)], axis=1)
+    result_bottom = pd.DataFrame([np.append(treated_pre_collapsed, treated_post_collapsed)])
+    result_bottom.index = [N0]
+
+    return pd.concat([result_top, result_bottom])

@@ -82,15 +82,15 @@ result_sdid = sdid(
 )
 tau_sdid = result_sdid["att"]
 
-# result_sdid_w = sdid(
-#     data_ref,
-#     unit="unit",
-#     time="time",
-#     treatment="treatment",
-#     outcome="outcome",
-#     treated_weights=treated_weights
-# )
-# tau_sdid_w = result_sdid_w["att"]
+result_sdid_w = sdid(
+    data_ref,
+    unit="unit",
+    time="time",
+    treatment="treatment",
+    outcome="outcome",
+    treated_weights=treated_weights
+)
+tau_sdid_w = result_sdid_w["att"]
 
 se_sdid = jackknife_se(
     data_ref,
@@ -99,23 +99,21 @@ se_sdid = jackknife_se(
     weights=result_sdid["weights"]
 )
 
-#jackknife_se_weighted(data_ref,time_breaks,att,weights,treated_weights=None):
+jackknife_se_weighted(data_ref,time_breaks,att,weights,treated_weights=None):
 
-# se_sdid_w = bootstrap_se_weighted(
-#     data_ref,
-#     treated_weights=treated_weights,
-#     cluster="cluster",
-#     n_reps=200
-# )
+se_sdid_w = bootstrap_se_weighted(
+    data_ref,
+    treated_weights=treated_weights,
+    cluster="cluster",
+    n_reps=200
+)
 
-# results = pd.DataFrame({
-#     "Estimator": ["SDID"],
-#     "Equally weighted": [tau_sdid],
-#     "SE (eq.)": [se_sdid],
-#     "Population weighted": [tau_sdid_w],
-#     "SE (wt.)": [se_sdid_w]
-# })
+results = pd.DataFrame({
+    "Estimator": ["SDID"],
+    "Equally weighted": [tau_sdid],
+    "SE (eq.)": [se_sdid],
+    "Population weighted": [tau_sdid_w],
+    "SE (wt.)": [se_sdid_w]
+})
 
-# print(results.round(2))
-
-# assert len(treated_weights) == data_ref.loc[data_ref["treated"] == 1, "unit"].nunique()
+print(results.round(2))

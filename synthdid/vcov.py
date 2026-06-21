@@ -11,13 +11,6 @@ def renormalize_weights(treated_weights, counts):
         return np.full(len(treated_weights), 1/len(treated_weights))
     return w / total
 
-def sum_normalize(x):
-    x = np.asarray(x, dtype=float)
-    s = x.sum()
-    if s == 0:
-        return x
-    return x / s
-
 def build_setup(data):
     """
     Creates R-like setup object:
@@ -50,43 +43,55 @@ def bootstrap_se_weighted(data_ref, treated_weights, cluster=None, n_reps=50):
     def get_tw_b(sampled_df):
         sampled_treated = pd.unique(sampled_df[sampled_df.treated == 1].unit)
         orig_ids = [u.rsplit("__", 1)[0] for u in sampled_treated]
-        # convert back to original type to match tw_dict keys
         orig_ids = [type(treated_units_orig[0])(i) for i in orig_ids]
         return sum_normalize(np.array([tw_dict[orig_id] for orig_id in orig_ids]))
 
     if cluster is not None:
         unique_clusters = np.unique(data_ref[cluster])
-        def theta_bt():
+        def draw():
             sampled_clusters = np.random.choice(unique_clusters, replace=True, size=len(unique_clusters))
             pieces = []
             for idx, c in enumerate(sampled_clusters):
                 chunk = data_ref[data_ref[cluster] == c].copy()
                 chunk = chunk.assign(unit=chunk["unit"].astype(str) + f"__{idx}")
                 pieces.append(chunk)
-            sampled_df = pd.concat(pieces, ignore_index=True)
-            if len(np.unique(sampled_df.treatment)) != 2:
-                return theta_bt()
-            tw_b = get_tw_b(sampled_df)
-            return sdid(sampled_df, "unit", "time", "treatment", "outcome", treated_weights=tw_b)["att"]
+            return pd.concat(pieces, ignore_index=True)
     else:
         unique_units = np.unique(data_ref.unit)
-        def theta_bt():
+        def draw():
             sampled = np.random.choice(unique_units, replace=True, size=len(unique_units))
             pieces = []
             for idx, u in enumerate(sampled):
                 chunk = data_ref[data_ref.unit == u].copy()
                 chunk = chunk.assign(unit=str(u) + f"__{idx}")
                 pieces.append(chunk)
-            sampled_df = pd.concat(pieces, ignore_index=True)
-            if len(np.unique(sampled_df.treatment)) != 2:
-                return theta_bt()
-            tw_b = get_tw_b(sampled_df)
-            return sdid(sampled_df, "unit", "time", "treatment", "outcome", treated_weights=tw_b)["att"]
+            return pd.concat(pieces, ignore_index=True)
 
     atts = []
-    while len(atts) < n_reps:
-        atts.append(theta_bt())
+    attempts = 0
+    max_attempts = n_reps * 10
+    failures = 0
+
+    while len(atts) < n_reps and attempts < max_attempts:
+        attempts += 1
+        try:
+            sampled_df = draw()
+            if len(np.unique(sampled_df.treatment)) != 2:
+                continue
+            tw_b = get_tw_b(sampled_df)
+            att = sdid(sampled_df, "unit", "time", "treatment", "outcome", treated_weights=tw_b)["att"]
+            atts.append(att)
+        except Exception:
+            failures += 1
+
+    if failures > 0:
+        print(f"Warning: bootstrap_se_weighted: {failures} of {attempts} attempts failed")
+    if len(atts) < n_reps:
+        print(f"Warning: bootstrap_se_weighted: only {len(atts)} of {n_reps} replicates completed")
+
     atts = np.array(atts)
+    if len(atts) == 0:
+        return np.nan
     return np.sqrt(np.var(atts, ddof=0))
 
 def bootstrap_se(data_ref, n_reps = 50):
@@ -309,8 +314,14 @@ def jackknife_iteration_weighted(data, time_breaks, weights, unit_index: int, tr
         ).to_numpy()
 
         # --- ATT COMPUTATION (UPDATED STRUCTURE) ---
-        # treated weights are applied implicitly via expanded omega structure
-        att = tyear_omegas @ data_matrix @ tyear_lambdas.T
+        # Rebuild omega vector using actual treated weights instead of uniform 1/N_treated
+        N_control_remaining = len(tyear_omegas) - N_treated
+        omg = np.concatenate([
+            tyear_omegas[:N_control_remaining],
+            tyear_treated_weights
+        ])
+
+        att = omg @ data_matrix @ tyear_lambdas.T
 
         att_weight = (N_treated * T_post) / total_treated_unit_periods
         weighted_atts = np.concatenate([weighted_atts, [att * att_weight]])
@@ -376,7 +387,7 @@ def jackknife_se_weighted(data_ref,time_breaks,att,weights,treated_weights=None)
     return se_jackknife
 
 
-def cluster_jackknife_se_weighted(data,att,weights,treated_weights=None,cluster_col=None):
+def cluster_jackknife_se_weighted(data, time_breaks, att, weights, treated_weights=None, cluster_col=None):
     clusters = np.unique(data[cluster_col])
     K = len(clusters)
 
@@ -434,7 +445,7 @@ class Variance:
                 se = placebo_se(data_ref, n_reps=n_reps)
         elif method=="bootstrap":
             if self.treated_weights is not None:
-                se = bootstrap_se_weighted(data_ref, n_reps=n_reps, cluster=self.cluster)
+                se = bootstrap_se_weighted(data_ref, self.treated_weights, n_reps=n_reps, cluster=self.cluster)
             else:
                 se = bootstrap_se(data_ref, n_reps=n_reps)
         else:  # jackknife

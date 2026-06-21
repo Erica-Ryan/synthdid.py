@@ -1,65 +1,24 @@
-import pandas as pd, numpy as np
+import pandas as pd
+import numpy as np
 
 def california_prop99() -> pd.DataFrame:
-    return pd.read_csv("https://github.com/d2cml-ai/Synthdid.jl/raw/stag_treat/data/california_prop99.csv", sep=";")
+    url = "https://github.com/d2cml-ai/Synthdid.jl/raw/stag_treat/data/california_prop99.csv"
+    try:
+        return pd.read_csv(url, sep=";")
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to fetch california_prop99 data from {url}. "
+            "Check your internet connection or download the file manually.\n"
+            f"Original error: {e}"
+        )
 
 def quota() -> pd.DataFrame:
-    return pd.read_csv("https://github.com/d2cml-ai/Synthdid.jl/raw/stag_treat/data/quota.csv")
-
-# print(quota())
-# _path = os.path.join(os.path.dirname(__file__), '../data/MLAB_data.txt')
-
-# def fetch_CaliforniaSmoking() -> pd.DataFrame:
-#     """
-#     This data is from https://web.stanford.edu/~jhain/synthpage.html
-#     [Return]
-#     pd.DataFrame
-#     """
-    
-#     _raw = pd.read_csv(_path, sep="\t", header=None)
-
-#     _raw.columns = [
-#         "Alabama",
-#         "Arkansas",
-#         "Colorado",
-#         "Connecticut",
-#         "Delaware",
-#         "Georgia",
-#         "Idaho",
-#         "Illinois",
-#         "Indiana",
-#         "Iowa",
-#         "Kansas",
-#         "Kentucky",
-#         "Louisiana",
-#         "Maine",
-#         "Minnesota",
-#         "Mississippi",
-#         "Missouri",
-#         "Montana",
-#         "Nebraska",
-#         "Nevada",
-#         "New Hampshire",
-#         "New Mexico",
-#         "North Carolina",
-#         "North Dakota",
-#         "Ohio",
-#         "Oklahoma",
-#         "Pennsylvania",
-#         "Rhode Island",
-#         "South Carolina",
-#         "South Dakota",
-#         "Tennessee",
-#         "Texas",
-#         "Utah",
-#         "Vermont",
-#         "Virginia",
-#         "West Virginia",
-#         "Wisconsin",
-#         "Wyoming",
-#         "California",
-#     ]
-
-#     _raw.index = [i for i in range(1962, 2001)]
-
-#     return _raw.loc[1970:]
+    url = "https://github.com/d2cml-ai/Synthdid.jl/raw/stag_treat/data/quota.csv"
+    try:
+        return pd.read_csv(url)
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to fetch quota data from {url}. "
+            "Check your internet connection or download the file manually.\n"
+            f"Original error: {e}"
+        )
