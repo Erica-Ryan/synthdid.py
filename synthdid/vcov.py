@@ -1,462 +1,395 @@
+import numpy as np
+import pandas as pd
 
-import itertools, pandas as pd, numpy as np
-from .sdid import sdid
-from .utils import sum_normalize, varianza
+# ---------------------------------------------------------------------
+# Utilities
+# ---------------------------------------------------------------------
 
-def renormalize_weights(treated_weights, counts):
-    """Bootstrap weight renormalization — eq:boot-w from paper."""
-    w = np.array(treated_weights) * np.array(counts)
-    total = w.sum()
-    if total == 0:
-        return np.full(len(treated_weights), 1/len(treated_weights))
-    return w / total
+def sum_normalize(x):
+    x = np.asarray(x, dtype=float)
+    s = x.sum()
+    if s != 0:
+        return x / s
+    return np.ones_like(x) / len(x)
 
-def build_setup(data):
+def _reindex_treated_weights(df, original_treated_units, treated_weights):
     """
-    Creates R-like setup object:
-    Y: (N units × T times) matrix
-    unit_index maps dataframe units to matrix rows
+    Align treated weights to the treated units present in df.
+    This mirrors synthdid's implicit subsetting behavior.
     """
-    units = np.unique(data["unit"])
-    times = np.unique(data["time"])
+    if treated_weights is None:
+        return None
 
-    unit_to_row = {u: i for i, u in enumerate(units)}
-    time_to_col = {t: j for j, t in enumerate(times)}
+    df_treated_units = df[df["treated"] == 1]["unit"].unique()
+
+    unit_to_weight = dict(zip(original_treated_units, treated_weights))
+
+    w = np.array([unit_to_weight[u] for u in df_treated_units])
+
+    return sum_normalize(w)
+
+def _cluster_groups(df, cluster_col):
+    """
+    Returns dict: cluster_id -> dataframe slice
+    """
+    return {c: df[df[cluster_col] == c] for c in df[cluster_col].unique()}
+
+
+def _sdid(df, sdid_fn, treated_weights=None, original_treated_units=None):
+    return sdid_fn(
+        df,
+        unit="unit",
+        time="time",
+        treatment="treatment",
+        outcome="outcome",
+        treated_weights=_reindex_treated_weights(
+            df,
+            original_treated_units,
+            treated_weights
+        )
+    )["att"]
+
+def _precompute_panel(df, unit_col="unit", time_col="time", y_col="outcome"):
+    units = df[unit_col].unique()
+    times = df[time_col].unique()
+
+    u_index = {u: i for i, u in enumerate(units)}
+    t_index = {t: j for j, t in enumerate(times)}
 
     Y = np.full((len(units), len(times)), np.nan)
 
-    for _, r in data.iterrows():
-        Y[unit_to_row[r["unit"]], time_to_col[r["time"]]] = r["outcome"]
+    for r in df.itertuples(index=False):
+        Y[u_index[getattr(r, unit_col)], t_index[getattr(r, time_col)]] = getattr(r, y_col)
 
-    return {
-        "Y": Y,
-        "units": units,
-        "times": times,
-        "unit_to_row": unit_to_row,
-        "time_to_col": time_to_col
-    }
+    return Y, units, times, u_index
 
-def bootstrap_se_weighted(data_ref, treated_weights, cluster=None, n_reps=50):
-    treated_units_orig = list(np.unique(data_ref[data_ref.treated == 1].unit))
-    tw_dict = {u: w for u, w in zip(treated_units_orig, treated_weights)}
 
-    def get_tw_b(sampled_df):
-        sampled_treated = pd.unique(sampled_df[sampled_df.treated == 1].unit)
-        orig_ids = [u.rsplit("__", 1)[0] for u in sampled_treated]
-        orig_ids = [type(treated_units_orig[0])(i) for i in orig_ids]
-        return sum_normalize(np.array([tw_dict[orig_id] for orig_id in orig_ids]))
 
-    if cluster is not None:
-        unique_clusters = np.unique(data_ref[cluster])
-        def draw():
-            sampled_clusters = np.random.choice(unique_clusters, replace=True, size=len(unique_clusters))
-            pieces = []
-            for idx, c in enumerate(sampled_clusters):
-                chunk = data_ref[data_ref[cluster] == c].copy()
-                chunk = chunk.assign(unit=chunk["unit"].astype(str) + f"__{idx}")
-                pieces.append(chunk)
-            return pd.concat(pieces, ignore_index=True)
-    else:
-        unique_units = np.unique(data_ref.unit)
-        def draw():
-            sampled = np.random.choice(unique_units, replace=True, size=len(unique_units))
-            pieces = []
-            for idx, u in enumerate(sampled):
-                chunk = data_ref[data_ref.unit == u].copy()
-                chunk = chunk.assign(unit=str(u) + f"__{idx}")
-                pieces.append(chunk)
-            return pd.concat(pieces, ignore_index=True)
+# ---------------------------------------------------------------------
+# Bootstrap (Algorithm 2)
+# ---------------------------------------------------------------------
 
-    atts = []
-    attempts = 0
-    max_attempts = n_reps * 10
-    failures = 0
+def bootstrap_se(df, sdid_fn, B=200, treated_weights=None, seed=None):
 
-    while len(atts) < n_reps and attempts < max_attempts:
-        attempts += 1
-        try:
-            sampled_df = draw()
-            if len(np.unique(sampled_df.treatment)) != 2:
-                continue
-            tw_b = get_tw_b(sampled_df)
-            att = sdid(sampled_df, "unit", "time", "treatment", "outcome", treated_weights=tw_b)["att"]
-            atts.append(att)
-        except Exception:
-            failures += 1
+    if seed is not None:
+        np.random.seed(seed)
 
-    if failures > 0:
-        print(f"Warning: bootstrap_se_weighted: {failures} of {attempts} attempts failed")
-    if len(atts) < n_reps:
-        print(f"Warning: bootstrap_se_weighted: only {len(atts)} of {n_reps} replicates completed")
+    units = df["unit"].unique()
+    original_treated_units = df[df["treated"] == 1]["unit"].unique()
 
-    atts = np.array(atts)
-    if len(atts) == 0:
-        return np.nan
-    return np.sqrt(np.var(atts, ddof=0))
+    estimates = []
 
-def bootstrap_se(data_ref, n_reps = 50):
-    uniqueID = np.unique(data_ref.unit)
-    N = len(uniqueID)
-    def theta_bt():
-        sample_id = np.random.choice(uniqueID, replace=True, size=N)
-        def sample_concat(_id):
-            sample_id_n = sample_id[_id]
-            data_c = data_ref[data_ref.unit == sample_id_n].copy()
-            data_c = data_c.assign(unit1=str(sample_id_n) + "_" + str(_id))
-            return data_c
-        sampled_df = pd.concat([sample_concat(i) for i in range(N)], ignore_index=True)
-        if len(np.unique(sampled_df.treatment)) != 2:
-            return theta_bt()
-        att_aux = sdid(sampled_df, "unit1", "time", "treatment", "outcome")["att"]
-        return att_aux
-    t = 0
-    att_bt = np.array([])
-    while t < n_reps:
-        t+= 1
-        aux = theta_bt()
-        att_bt = np.append(att_bt, aux)
-    se_bootstrap = np.sqrt(1 / n_reps * np.sum((att_bt - np.sum(att_bt / n_reps)) ** 2))
-    return se_bootstrap
+    for _ in range(B):
+        sampled_units = np.random.choice(units, size=len(units), replace=True)
 
-def placebo_se_weighted(data_ref, treated_weights, n_reps=50, placebo_weights="uniform"):
-    """
-    Weighted placebo SE (Algorithm 4 adapted for treated weights)
-    """
-    tr_years = data_ref.query("time == tyear and tyear != 0").time
-    N_tr = len(tr_years)
+        df_b = pd.concat(
+            [df[df["unit"] == u].assign(__u=i)
+             for i, u in enumerate(sampled_units)],
+            ignore_index=True
+        ).rename(columns={"__u": "unit"})
 
-    df_co = data_ref.query("treated == 0")
-    control_units = np.unique(df_co.unit)
-
-    if len(control_units) <= N_tr:
-        raise ValueError("Must have more control units than treated units")
-
-    treated_weights = np.array(treated_weights)
-
-    def draw_placebo_weights(sampled_units):
-        if placebo_weights == "uniform":
-            return np.full(N_tr, 1 / N_tr)
-
-        elif placebo_weights == "permute":
-            return np.random.permutation(treated_weights)[:N_tr]
-
-        elif placebo_weights == "size_match":
-            # weight by pre-treatment outcome means
-            pre = data_ref[data_ref.time < data_ref.tyear]
-            means = []
-            for u in sampled_units:
-                vals = pre[pre.unit == u].outcome
-                means.append(np.abs(vals.mean()) if len(vals) > 0 else 0)
-            w = np.array(means)
-            if w.sum() == 0:
-                return np.full(N_tr, 1 / N_tr)
-            return w / w.sum()
-
-        else:
-            raise ValueError("Invalid placebo_weights option")
-
-    def theta_pb():
-        sampled_units = np.random.choice(control_units, size=N_tr, replace=False)
-
-        placebo_years = pd.DataFrame({
-            "unit": sampled_units,
-            "tyear1": tr_years
-        })
-
-        aux_data = df_co.merge(placebo_years, on="unit", how='outer')
-        aux_data = aux_data.assign(
-            tyear=aux_data.tyear1.fillna(aux_data["tyear"])
-        )
-
-        aux_data = aux_data.assign(
-            treatment=np.where(
-                ((aux_data.tyear != 0) & (aux_data.time == aux_data.tyear)),
-                1, 0
-            )
-        ).reset_index(drop=True)
-
-        aux_data["treated"] = aux_data.groupby("unit")["treatment"].transform("max")
-
-        tw = draw_placebo_weights(sampled_units)
-
-        return sdid(
-            aux_data,
-            "unit",
-            "time",
-            "treatment",
-            "outcome",
-            treated_weights=tw
-        )["att"]
-
-    atts = []
-    attempts = 0
-    max_attempts = n_reps * 10
-
-    while len(atts) < n_reps and attempts < max_attempts:
-        attempts += 1
-        try:
-            atts.append(theta_pb())
-        except Exception:
+        if df_b["treatment"].nunique() < 2:
             continue
 
-    if len(atts) < n_reps:
-        print(f"Warning: only {len(atts)} successful placebo reps")
-
-    atts = np.array(atts)
-    return np.sqrt(np.var(atts, ddof=0))
-    
-def placebo_se(data_ref, n_reps=50):
-    tr_years = data_ref.query("time == tyear and tyear != 0").time
-    N_tr = len(tr_years)
-    df_co = data_ref.query("treated == 0")
-    units_df_co = np.unique(df_co.unit)
-    N_co = len(units_df_co)
-    N_aux = N_co - N_tr
-    
-    def theta_pb():
-        plabeo_years = pd.DataFrame({
-            "unit": np.random.choice(units_df_co, size=N_tr, replace=False),
-            'tyear1': tr_years
-        })
-        aux_data = df_co.merge(plabeo_years, on="unit", how='outer').sort_values("tyear1")
-        aux_data = aux_data.assign(
-            tyear=aux_data.tyear1.fillna(aux_data["tyear"])
+        estimates.append(
+            _sdid(df_b, sdid_fn, treated_weights, original_treated_units)
         )
-        aux_data = aux_data.assign(
-            treatment=np.where(((aux_data.tyear != 0) & (aux_data.time == aux_data.tyear)), 1, 0)
-        ).reset_index(drop=True)
-        aux_data["treated"] = aux_data.groupby("unit")["treatment"].transform("max")
-        att = sdid(aux_data, "unit", "time", "treatment", "outcome")
-        return att["att"]
-    
-    t = 0
-    att_pb = np.array([])
-    while t < n_reps:
-        t += 1
-        aux = theta_pb()
-        att_pb = np.append(att_pb, aux)
-    se_placebo = np.sqrt(1 / n_reps * np.sum((att_pb - np.sum(att_pb / n_reps)) ** 2))
-    return se_placebo
 
-def jackknife_iteration(data, time_breaks, weights, unit_index: int) -> np.ndarray:
-    weighted_atts = np.array([])
-    total_treated_unit_periods = data[data.treatment == 1].shape[0]
+    estimates = np.asarray(estimates)
 
-    for tyear_index, treatment_year in enumerate(time_breaks):
-        tyear_data = data[data.tyear.isin([0, treatment_year])]
-        N_treated = pd.unique(data[data.tyear == treatment_year].unit).shape[0]
-        tyear_omegas =  - weights["omega"][tyear_index]
-        N_control = tyear_omegas.shape[0]
-        tyear_omegas = np.concatenate([tyear_omegas, np.array([1/N_treated for _ in range(N_treated)])])
-        if unit_index < N_control:
-            tyear_omegas = np.delete(tyear_omegas, unit_index)
-        tyear_lambdas = - weights["lambda"][tyear_index]
-        T_post = pd.unique(tyear_data.time).shape[0] - tyear_lambdas.shape[0]
-        tyear_treated_unit_periods = N_treated * T_post
-        tyear_lambdas = np.concatenate([tyear_lambdas, np.array([1 / T_post for _ in range(T_post)])])
-        data_matrix = tyear_data.pivot_table(values = "outcome", index = "unit", columns = "time", sort = False).to_numpy() #type: ignore
-        att = tyear_omegas @ data_matrix @ tyear_lambdas.T
-        att_weight = tyear_treated_unit_periods / total_treated_unit_periods
-        weighted_atts = np.concatenate([weighted_atts, [att * att_weight]])
-    
-    jk_iteration_att = weighted_atts.sum()
-    return np.array([jk_iteration_att])
-        
-def jackknife_iteration_weighted(data, time_breaks, weights, unit_index: int, treated_weights=None) -> np.ndarray:
-    weighted_atts = np.array([])
-    total_treated_unit_periods = data[data.treatment == 1].shape[0]
+    if len(estimates) < 2:
+        return np.nan
 
-    for tyear_index, treatment_year in enumerate(time_breaks):
-        tyear_data = data[data.tyear.isin([0, treatment_year])]
-        N_treated = pd.unique(data[data.tyear == treatment_year].unit).shape[0]
+    return np.sqrt((len(estimates) - 1) / len(estimates)) * np.std(estimates, ddof=0)
 
-        # --- CONTROL WEIGHTS (UNCHANGED LOGIC) ---
-        tyear_omegas = - weights["omega"][tyear_index]
-        N_control = tyear_omegas.shape[0]
 
-        tyear_omegas = np.concatenate([
-            tyear_omegas,
-            np.array([1 / N_treated for _ in range(N_treated)])
-        ])
+def cluster_bootstrap_se(df, sdid_fn, cluster_col="cluster", B=200, seed=None):
+    if seed is not None:
+        np.random.seed(seed)
 
-        if unit_index < N_control:
-            tyear_omegas = np.delete(tyear_omegas, unit_index)
+    clusters = df[cluster_col].unique()
+    G = len(clusters)
 
-        # --- TREATED WEIGHTS (NEW ADDITION) ---
+    cluster_map = _cluster_groups(df, cluster_col)
+
+    estimates = []
+
+    for _ in range(B):
+        sampled_clusters = np.random.choice(clusters, size=G, replace=True)
+
+        df_b = pd.concat(
+            [cluster_map[c].copy().assign(__g=i)
+             for i, c in enumerate(sampled_clusters)],
+            ignore_index=True
+        )
+
+        # reassign cluster id for SDID internal consistency
+        df_b = df_b.rename(columns={"__g": cluster_col})
+
+        if df_b["treatment"].nunique() < 2:
+            continue
+
+        estimates.append(_sdid(df_b, sdid_fn))
+
+    estimates = np.asarray(estimates)
+
+    if len(estimates) < 2:
+        return np.nan
+
+    return np.sqrt((len(estimates) - 1) / len(estimates)) * np.std(estimates, ddof=0)
+
+# ---------------------------------------------------------------------
+# Jackknife (Algorithm 3)
+# ---------------------------------------------------------------------
+
+def jackknife_se(df, sdid_fn, treated_weights=None):
+
+    units = df["unit"].unique()
+    original_treated_units = df[df["treated"] == 1]["unit"].unique()
+
+    estimates = []
+
+    for u in units:
+        df_j = df[df["unit"] != u]
+
+        if df_j["treatment"].nunique() < 2:
+            continue
+
+        estimates.append(
+            _sdid(df_j, sdid_fn, treated_weights, original_treated_units)
+        )
+
+    estimates = np.asarray(estimates)
+
+    if len(estimates) < 2:
+        return np.nan
+
+    theta_bar = estimates.mean()
+    n = len(estimates)
+
+    return np.sqrt(((n - 1) / n) * np.sum((estimates - theta_bar) ** 2))
+
+import numpy as np
+
+def jackknife_se_fast(df, sdid_fn, treated_weights=None):
+    units = df["unit"].unique()
+    treated_units = df[df["treated"] == 1]["unit"].unique()
+
+    tpos = {u: i for i, u in enumerate(treated_units)}
+
+    estimates = []
+
+    for u in units:
+        df_j = df[df["unit"] != u]
+
+        if df_j["treatment"].nunique() < 2:
+            continue
+
+        tw_j = None
         if treated_weights is not None:
-            tyear_treated_weights = np.array(treated_weights[tyear_index])
+            kept = df_j[df_j["treated"] == 1]["unit"].unique()
+            idx = [tpos[x] for x in kept if x in tpos]
 
-            # only adjust if a treated unit is removed
-            if unit_index >= N_control:
-                treated_index = unit_index - N_control
-                tyear_treated_weights = np.delete(tyear_treated_weights, treated_index)
+            if len(idx) > 0:
+                tw_j = np.array(treated_weights)[idx]
+                tw_j = tw_j / tw_j.sum()
 
-            # renormalize treated weights
-            tyear_treated_weights = tyear_treated_weights / tyear_treated_weights.sum()
-        else:
-            # fallback to original implicit uniform structure
-            tyear_treated_weights = np.array([1 / N_treated for _ in range(N_treated)])
-
-        # --- LAMBDA (UNCHANGED) ---
-        tyear_lambdas = - weights["lambda"][tyear_index]
-        T_post = pd.unique(tyear_data.time).shape[0] - tyear_lambdas.shape[0]
-
-        tyear_lambdas = np.concatenate([
-            tyear_lambdas,
-            np.array([1 / T_post for _ in range(T_post)])
-        ])
-
-        data_matrix = tyear_data.pivot_table(
-            values="outcome",
-            index="unit",
-            columns="time",
-            sort=False
-        ).to_numpy()
-
-        # --- ATT COMPUTATION (UPDATED STRUCTURE) ---
-        # Rebuild omega vector using actual treated weights instead of uniform 1/N_treated
-        N_control_remaining = len(tyear_omegas) - N_treated
-        omg = np.concatenate([
-            tyear_omegas[:N_control_remaining],
-            tyear_treated_weights
-        ])
-
-        att = omg @ data_matrix @ tyear_lambdas.T
-
-        att_weight = (N_treated * T_post) / total_treated_unit_periods
-        weighted_atts = np.concatenate([weighted_atts, [att * att_weight]])
-
-    jk_iteration_att = weighted_atts.sum()
-    return np.array([jk_iteration_att])
-
-
-def jackknife_se(data_ref: pd.DataFrame, time_breaks, att, weights):
-    
-    for tyear in time_breaks:
-        if pd.unique(data_ref[data_ref.tyear == tyear].unit).shape[0] == 1:
-            raise ValueError(f"Each adoption year must have more than one treated unit. Year {tyear} does not comply")
-    
-    unique_units = pd.unique(data_ref.unit.unique())
-    jackknife_ates = np.array([])
-
-    for unit_index, unit in enumerate(unique_units):
-        iteration_ate = jackknife_iteration(
-            data_ref[data_ref.unit != unit],
-            time_breaks,
-            weights,
-            unit_index
+        estimates.append(
+            sdid_fn(
+                df_j,
+                "unit",
+                "time",
+                "treatment",
+                "outcome",
+                treated_weights=tw_j
+            )["att"]
         )
-        jackknife_ates = np.concatenate([
-            jackknife_ates,
-            iteration_ate
-        ])
-    
-    total_units = unique_units.shape[0]
-    var_jackknife = (total_units - 1) / total_units * ((jackknife_ates - att) ** 2).sum()
-    se_jackknife = np.sqrt(var_jackknife)
 
-    return se_jackknife
+    estimates = np.asarray(estimates)
 
-
-def jackknife_se_weighted(data_ref,time_breaks,att,weights,treated_weights=None):
-        
-    for tyear in time_breaks:
-        if pd.unique(data_ref[data_ref.tyear == tyear].unit).shape[0] == 1:
-            raise ValueError(f"Each adoption year must have more than one treated unit. Year {tyear} does not comply")
-    
-    unique_units = pd.unique(data_ref.unit.unique())
-    jackknife_ates = np.array([])
-
-    for unit_index, unit in enumerate(unique_units):
-        iteration_ate = jackknife_iteration_weighted(
-            data_ref[data_ref.unit != unit],
-            time_breaks,
-            weights,
-            unit_index,
-            treated_weights=treated_weights
-        )
-        jackknife_ates = np.concatenate([
-            jackknife_ates,
-            iteration_ate
-        ])
-    
-    total_units = unique_units.shape[0]
-    var_jackknife = (total_units - 1) / total_units * ((jackknife_ates - att) ** 2).sum()
-    se_jackknife = np.sqrt(var_jackknife)
-
-    return se_jackknife
-
-
-def cluster_jackknife_se_weighted(data, time_breaks, att, weights, treated_weights=None, cluster_col=None):
-    clusters = np.unique(data[cluster_col])
-    K = len(clusters)
-
-    if K <= 1:
+    if len(estimates) < 2:
         return np.nan
 
-    theta_k = []
+    n = len(estimates)
+    mean = estimates.mean()
 
-    for cl in clusters:
-        # 1. Leave out entire cluster
-        data_k = data[data[cluster_col] != cl]
+    return np.sqrt(((n - 1) / n) * np.sum((estimates - mean) ** 2))
 
-        # skip degenerate cases
-        if len(np.unique(data_k["unit"])) == 0:
+
+# Ultrafast requires sdid_matrix_fn(Y, treated_mask), have to modify sdid if you want that.
+# def build_panel(df):
+#     units = df["unit"].unique()
+#     times = df["time"].unique()
+
+#     u = {x:i for i,x in enumerate(units)}
+#     t = {x:i for i,x in enumerate(times)}
+
+#     Y = np.full((len(units), len(times)), np.nan)
+
+#     for r in df.itertuples(index=False):
+#         Y[u[r.unit], t[r.time]] = r.outcome
+
+#     treated_mask = np.array([
+#         df[df["unit"] == x]["treated"].iloc[0]
+#         for x in units
+#     ])
+
+#     return Y, units, treated_mask
+
+# def jackknife_se_ultrafast(df, sdid_matrix_fn):
+#     Y, units, treated_mask = build_panel(df)
+
+#     estimates = []
+
+#     for i in range(len(units)):
+#         Y_j = np.delete(Y, i, axis=0)
+#         treated_j = np.delete(treated_mask, i)
+
+#         if treated_j.sum() == 0 or treated_j.sum() == len(treated_j):
+#             continue
+
+#         estimates.append(
+#             sdid_matrix_fn(Y_j, treated_j)
+#         )
+
+#     estimates = np.asarray(estimates)
+
+#     if len(estimates) < 2:
+#         return np.nan
+
+#     n = len(estimates)
+#     return np.sqrt(((n - 1) / n) * np.var(estimates, ddof=0))
+
+def cluster_jackknife_se(df, sdid_fn, cluster_col="cluster"):
+    clusters = df[cluster_col].unique()
+
+    estimates = []
+
+    for c in clusters:
+        df_j = df[df[cluster_col] != c]
+
+        if df_j["treatment"].nunique() < 2:
             continue
 
-        # 2. Recompute estimator fully
-        try:
-            res = sdid(
-                data_k,
-                unit="unit",
-                time="time",
-                treatment="treatment",
-                outcome="outcome",
-                treated_weights=treated_weights
-            )
-            theta_k.append(res["att"])
-        except Exception:
-            continue
+        estimates.append(_sdid(df_j, sdid_fn))
 
-    theta_k = np.asarray(theta_k)
-    K_eff = len(theta_k)
+    estimates = np.asarray(estimates)
 
-    if K_eff < 2:
+    if len(estimates) < 2:
         return np.nan
 
-    # 3. Cluster jackknife variance
-    theta_bar = theta_k.mean()
-    var = (K_eff - 1) / K_eff * np.sum((theta_k - theta_bar) ** 2)
+    theta_bar = estimates.mean()
+    G = len(estimates)
 
-    return np.sqrt(var)
+    return np.sqrt(((G - 1) / G) * np.sum((estimates - theta_bar) ** 2))
 
+
+# ---------------------------------------------------------------------
+# Placebo (Algorithm 4)
+# ---------------------------------------------------------------------
+
+def placebo_se(df, sdid_fn, B=200, treated_weights=None, seed=None):
+
+    if seed is not None:
+        np.random.seed(seed)
+
+    control = df[df["treated"] == 0].copy()
+
+    treated_units = df[df["treated"] == 1]["unit"].unique()
+    treated_years = df.loc[df["treated"] == 1, "tyear"].unique()
+
+    N1 = len(treated_years)
+    control_units = control["unit"].unique()
+
+    estimates = []
+
+    for _ in range(B):
+        sampled_units = np.random.choice(control_units, size=N1, replace=False)
+
+        map_df = pd.DataFrame({
+            "unit": sampled_units,
+            "tyear": treated_years
+        })
+
+        df_pb = control.merge(map_df, on="unit", how="left")
+        df_pb["tyear"] = df_pb["tyear"].fillna(0)
+
+        df_pb["treatment"] = (
+            (df_pb["tyear"] != 0) &
+            (df_pb["time"] == df_pb["tyear"])
+        ).astype(int)
+
+        df_pb["treated"] = df_pb.groupby("unit")["treatment"].transform("max")
+
+        estimates.append(
+            _sdid(df_pb, sdid_fn, treated_weights, treated_units)
+        )
+
+    estimates = np.asarray(estimates)
+
+    if len(estimates) < 2:
+        return np.nan
+
+    return np.sqrt((len(estimates) - 1) / len(estimates)) * np.std(estimates, ddof=0)
+
+# ---------------------------------------------------------------------
+# Unified interface
+# ---------------------------------------------------------------------
 
 class Variance:
-    def vcov(self, method="placebo", n_reps=50):
-        data_ref = self.data_ref
-        if method=="placebo":
-            if self.treated_weights is not None:
-                se = placebo_se_weighted(
-                    data_ref,
-                    self.treated_weights,
-                    n_reps=n_reps
+    def __init__(self, data_ref, sdid_fn, treated_weights=None, cluster_col=None):
+        self.data_ref = data_ref
+        self.sdid_fn = sdid_fn
+        self.treated_weights = treated_weights
+        self.cluster_col = cluster_col
+        self.se = None
+
+    def vcov(self, method="bootstrap", B=200, seed=None):
+
+        df = self.data_ref
+
+        # -----------------------------
+        # CLUSTERED PATH (R equivalent)
+        # -----------------------------
+        if self.cluster_col is not None:
+
+            if method == "bootstrap":
+                se = cluster_bootstrap_se(
+                    df, self.sdid_fn,
+                    cluster_col=self.cluster_col,
+                    B=B,
+                    seed=seed
                 )
+
+            elif method == "jackknife":
+                se = cluster_jackknife_se(
+                    df, self.sdid_fn,
+                    cluster_col=self.cluster_col
+                )
+
+            elif method == "placebo":
+                raise NotImplementedError(
+                    "R does not implement cluster placebo SE"
+                )
+
             else:
-                se = placebo_se(data_ref, n_reps=n_reps)
-        elif method=="bootstrap":
-            if self.treated_weights is not None:
-                se = bootstrap_se_weighted(data_ref, self.treated_weights, n_reps=n_reps, cluster=self.cluster)
+                raise ValueError(method)
+
+        # -----------------------------
+        # UNIT LEVEL PATH
+        # -----------------------------
+        else:
+            if method == "bootstrap":
+                se = bootstrap_se(df, self.sdid_fn, B=B, seed=seed)
+
+            elif method == "jackknife":
+                se = jackknife_se(df, self.sdid_fn)
+
+            elif method == "placebo":
+                se = placebo_se(df, self.sdid_fn, B=B, seed=seed)
+
             else:
-                se = bootstrap_se(data_ref, n_reps=n_reps)
-        else:  # jackknife
-            time_break, weights = self.ttime, self.weights
-            if self.treated_weights is not None:
-                if self.cluster is not None:
-                    se = cluster_jackknife_se_weighted(data_ref, time_break, self.att, weights, self.treated_weights, self.cluster)
-                else:
-                    se = jackknife_se_weighted(data_ref, time_break, self.att, weights, self.treated_weights)
-            else:
-                se = jackknife_se(data_ref, time_break, self.att, weights)
+                raise ValueError(method)
+
         self.se = se
         return self
-

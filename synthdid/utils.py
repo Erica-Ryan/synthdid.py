@@ -119,12 +119,16 @@ def collapse_form_weighted(Y, N0, T0, treated_weights=None, period_weights=None)
     Y_treated_pre  = Y.iloc[N0:, :T0]
     Y_treated_post = Y.iloc[N0:, T0:]
 
-    control_post_collapsed = Y_control_post.values @ period_weights      # N0 x 1
-    treated_pre_collapsed  = Y_treated_pre.values.T @ treated_weights    # T0 x 1
-    treated_post_collapsed = treated_weights @ Y_treated_post.values @ period_weights  # scalar
+    control_post_collapsed = Y_control_post.values @ period_weights      # shape (N0,)
+    treated_pre_collapsed  = Y_treated_pre.values.T @ treated_weights    # shape (T0,)
+    treated_post_collapsed = float(treated_weights @ Y_treated_post.values @ period_weights)  # scalar
 
-    result_top = pd.concat([Y_control_pre, pd.Series(control_post_collapsed, index=Y_control_pre.index)], axis=1)
-    result_bottom = pd.DataFrame([np.append(treated_pre_collapsed, treated_post_collapsed)])
-    result_bottom.index = [N0]
+    result_top = pd.concat([
+        Y_control_pre.reset_index(drop=True),
+        pd.Series(control_post_collapsed)
+    ], axis=1)
+    result_top.columns = range(T0 + 1)
+    result_bottom = pd.DataFrame([[*treated_pre_collapsed, treated_post_collapsed]])
+    result_bottom.columns = range(T0 + 1)
 
-    return pd.concat([result_top, result_bottom])
+    return pd.concat([result_top, result_bottom], ignore_index=True)

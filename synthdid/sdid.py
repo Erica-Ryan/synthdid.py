@@ -40,7 +40,7 @@ def sdid(data: pd.DataFrame, unit, time, treatment, outcome, covariates=None,
 		N1s.append(N1)
 		T1s.append(T1)
 		Yc = collapse_form_weighted(Y, N0, T0, treated_weights=treated_weights)
-
+		
 		prediff = Y.iloc[:N0, :T0].apply(lambda x: x.diff(), axis=1).iloc[:, 1:]
 		noise_level = np.sqrt(varianza(np.array(prediff).flatten()))
 
@@ -98,7 +98,6 @@ def sdid(data: pd.DataFrame, unit, time, treatment, outcome, covariates=None,
 			y_beta = Y - np.sum(np.multiply(X, beta_est[:, np.newaxis, np.newaxis]), axis = 0)
 			Y_beta.append(y_beta)
 			tau_hat[i] = np.dot(omg, y_beta) @ lmd
-		
 
 		lambda_estimate.append(lambda_est)
 		omega_estimate.append(omega_est)
@@ -204,7 +203,10 @@ class SDID:
 					omega_est = np.full(N0,1/N0)
                                         
 
-				omg = np.concatenate(([-omega_est, np.full(N1, 1/N1)]))
+				tw = np.array(treated_weights)[:N1] if treated_weights is not None else np.full(N1, 1/N1)
+				tw = tw / tw.sum() if treated_weights is not None else tw
+
+				omg = np.concatenate(([-omega_est, tw]))
 				lmd = np.concatenate(([-lambda_est, np.full(T1, 1/T1)]))
 
 				tau_hat[i] = np.dot(omg, Y) @ lmd
@@ -226,7 +228,10 @@ class SDID:
 				beta_est = weigths["beta"]
 				beta_covariate.append(beta_est[0])
 
-				omg = np.concatenate(([-omega_est, np.full(N1, 1/N1)]))
+				tw = np.array(treated_weights)[:N1] if treated_weights is not None else np.full(N1, 1/N1)
+				tw = tw / tw.sum() if treated_weights is not None else tw
+
+				omg = np.concatenate(([-omega_est, tw]))
 				lmd = np.concatenate(([-lambda_est, np.full(T1, 1/T1)]))
 
 				y_beta = Y - np.sum(np.multiply(X, beta_est[:, np.newaxis, np.newaxis]), axis = 0)
@@ -239,7 +244,6 @@ class SDID:
 		weights = {"lambda":lambda_estimate, "omega": omega_estimate}
 
 		tau_hat_wt = tau_hat_wt / T_total
-
 		att = round(np.dot(tau_hat, tau_hat_wt), 5) 
 
 		att_info = pd.DataFrame(
