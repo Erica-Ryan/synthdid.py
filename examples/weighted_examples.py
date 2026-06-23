@@ -5,7 +5,7 @@ from synthdid.sdid import sdid
 from synthdid.vcov import jackknife_se, bootstrap_se_weighted
 
 # Load data
-panel = pd.read_csv("data/analysis_data.csv")
+panel = pd.read_csv("../data/analysis_data.csv")
 
 panel = panel.rename(columns={
     "fips": "unit",

@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.abspath(".."))
 
 from synthdid.sdid import sdid, SDID
 from synthdid.synthdid import Synthdid
-from synthdid.vcov import jackknife_se, bootstrap_se_weighted
+from synthdid.vcov import jackknife_se, bootstrap_se, bootstrap_se_weighted
 from synthdid.utils import panel_matrices
 
 # =============================================================================
@@ -156,12 +156,12 @@ print(f"PASS  7: summary() runs\n{m_w.summary2.to_string(index=False)}")
 # 8. Jackknife SE is positive and finite
 # =============================================================================
 time_breaks = sorted(data_ref.loc[data_ref["tyear"] > 0, "tyear"].unique())
-se_jk = jackknife_se(
-    data_ref,
-    time_breaks=time_breaks,
-    att=tau_sdid,
-    weights=result_sdid["weights"]
-)
+se_jk = jackknife_se(data_ref, 
+                     time_breaks=time_breaks,
+                     att = tau_sdid,
+                     weights=result_sdid["weights"]
+                     )
+
 assert np.isfinite(se_jk) and se_jk > 0, f"FAIL 8: {se_jk}"
 print(f"PASS  8: jackknife SE positive: {se_jk:.3f}")
 
@@ -175,14 +175,14 @@ print(f"PASS  9: weighted jackknife SE positive: {m_w.se:.3f}")
 # =============================================================================
 # 10. Weighted bootstrap SE is positive and finite
 # =============================================================================
-m_w.vcov(method="bootstrap", n_reps=50)
+m_w.vcov(method="bootstrap", n_reps=200)
 assert np.isfinite(m_w.se) and m_w.se > 0, f"FAIL 10: {m_w.se}"
 print(f"PASS 10: weighted bootstrap SE positive: {m_w.se:.3f}")
 
 # =============================================================================
 # 11. Weighted placebo SE is positive and finite
 # =============================================================================
-m_w.vcov(method="placebo", n_reps=50)
+m_w.vcov(method="placebo", n_reps=200)
 assert np.isfinite(m_w.se) and m_w.se > 0, f"FAIL 11: {m_w.se}"
 print(f"PASS 11: weighted placebo SE positive: {m_w.se:.3f}")
 

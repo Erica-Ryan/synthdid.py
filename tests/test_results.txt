@@ -1,0 +1,19 @@
+PASS  1: unweighted ATT finite: -0.710
+PASS  2: weighted ATT finite: -17.451
+PASS  3: uniform weighted == unweighted (-0.710 vs -0.710)
+PASS  4: population weighted differs from unweighted by >1 (-17.451 vs -0.710, diff=-16.741)
+PASS  5: omega and lambda sum to one
+PASS  6: Synthdid class matches functional sdid() (unweighted=-0.710, weighted=-17.451)
+PASS  7: summary() runs
+      ATT Std. Err. t P>|t|
+-17.45141         - -     -
+PASS  8: jackknife SE positive: 2.319
+PASS  9: weighted jackknife SE positive: 2.286
+PASS 10: weighted bootstrap SE positive: 4.375
+PASS 11: weighted placebo SE positive: 3.857
+PASS 12: DID weighted ATT finite: -18.392
+PASS 13: SC weighted ATT finite: -97.435
+PASS 14: N1_eff 102 < N1 1181
+PASS 15: weighted ATT -17.451 in expected range (-25, -5)
+
+=== All 15 tests passed ===
