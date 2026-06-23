@@ -6,13 +6,12 @@ PASS  5: omega and lambda sum to one
 PASS  6: Synthdid class matches functional sdid() (unweighted=-0.710, weighted=-17.451)
 PASS  7: summary() runs
       ATT Std. Err. t P>|t|
--17.45141         - -     -
+-17.45139         - -     -
 PASS  8: jackknife SE positive: 2.319
 PASS  9: weighted jackknife SE positive: 2.286
-PASS 10: weighted bootstrap SE positive: 5.470
-PASS 11: weighted placebo SE positive: 3.481
+PASS 10: weighted bootstrap SE positive: 2.460
+PASS 11: weighted placebo SE positive: 3.061
 PASS 12: DID weighted ATT finite: -18.392
 PASS 13: SC weighted ATT finite: -97.435
 PASS 14: N1_eff 102 < N1 1181
 PASS 15: weighted ATT -17.451 in expected range (-25, -5)
-=== All 15 tests passed ===
