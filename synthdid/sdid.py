@@ -280,4 +280,3 @@ class SDID:
 		self.Y_units = Y_units
 
 		return self
-
