@@ -37,85 +37,59 @@ def build_setup(data):
     }
 
 def bootstrap_se_weighted(data_ref, treated_weights, weights=None, cluster=None, n_reps=50):
-    treated_units_orig = list(np.unique(data_ref[data_ref.treated == 1].unit))
-    control_units_orig = list(np.unique(data_ref[data_ref.treated == 0].unit))
-    tw_dict = {u: w for u, w in zip(treated_units_orig, treated_weights)}
-    omega = weights["omega"][0] if weights is not None else None
-    omega_dict = dict(zip(control_units_orig, omega)) if omega is not None else None
+    """
+    Fixed-weight bootstrap SE (Algorithm 2, weighted).
+    Mirrors R: build Y matrix once, resample row indices, compute ATT via matrix product.
+    """
+    if weights is None:
+        return _bootstrap_se_reestimate_weighted(data_ref, treated_weights, n_reps=n_reps)
 
-    def get_tw_b(control_ids, treated_ids):
-        return sum_normalize(np.array([tw_dict[u] for u in treated_ids]))
+    omega = weights["omega"][0]
+    lambda_pre = weights["lambda"][0]
 
-    def get_omega_b(control_ids):
-        if omega_dict is None:
-            return None
-        return sum_normalize(np.array([omega_dict[u] for u in control_ids]))
+    sorted_data = data_ref.sort_values(["treated", "unit", "time"])
+    tyear_vals = sorted(sorted_data.loc[sorted_data["tyear"] > 0, "tyear"].unique())
+    treatment_year = tyear_vals[0]
 
-    unique_units = np.unique(data_ref.unit)
+    tyear_data = sorted_data[sorted_data.tyear.isin([0, treatment_year])]
+    Y = tyear_data.pivot_table(values="outcome", index="unit", columns="time", sort=False).to_numpy()
+    N = Y.shape[0]
+    N0 = len(omega)
+    T0 = len(lambda_pre)
+    T1 = Y.shape[1] - T0
+    lmd = np.concatenate([-lambda_pre, np.full(T1, 1 / T1)])
 
-    def draw():
-        sampled = np.random.choice(unique_units, replace=True, size=len(unique_units))
-        # use merge instead of concat loop
-        sample_df = pd.DataFrame({'unit': sampled, 'idx': np.arange(len(sampled))})
-        merged = data_ref.merge(sample_df, on='unit')
-        merged['unit'] = merged['unit'].astype(str) + '__' + merged['idx'].astype(str)
-        merged = merged.drop(columns=['idx'])
-        return merged, sampled
+    def theta(ind):
+        control_ind = np.sort(ind[ind < N0])
+        treated_ind = np.sort(ind[ind >= N0])
+        if len(control_ind) == 0 or len(treated_ind) == 0:
+            return np.nan
+
+        omega_b = sum_normalize(omega[control_ind])
+        tw_local = treated_weights[treated_ind - N0]
+        tw_b = sum_normalize(tw_local)
+
+        Y_boot = Y[np.concatenate([control_ind, treated_ind]), :]
+        omg = np.concatenate([-omega_b, tw_b])
+        return omg @ Y_boot @ lmd
 
     atts = []
-    attempts = 0
-    max_attempts = n_reps * 10
-    failures = 0
-
-    while len(atts) < n_reps and attempts < max_attempts:
-        attempts += 1
-        try:
-            sampled_df, sampled_units = draw()
-            if len(np.unique(sampled_df.treatment)) != 2:
-                continue
-
-            # get original IDs for control and treated in this resample
-            control_ids  = [u for u in sampled_units if u in set(control_units_orig)]
-            treated_ids  = [u for u in sampled_units if u in set(treated_units_orig)]
-
-            if len(control_ids) == 0 or len(treated_ids) == 0:
-                continue
-
-            tw_b    = get_tw_b(control_ids, treated_ids)
-            omega_b = get_omega_b(control_ids)
-
-            # build renormalized weights for fixed-weight path
-            weights_b = {"omega": [omega_b], "lambda": weights["lambda"]} if weights is not None else None
-
-            att = sdid(sampled_df, "unit", "time", "treatment", "outcome",
-                      treated_weights=tw_b, weights=weights_b)["att"]
-            atts.append(att)
-        except Exception as e:
-            failures += 1
-
-    if failures > 0:
-        print(f"Warning: bootstrap_se_weighted: {failures} of {attempts} attempts failed")
-    if len(atts) < n_reps:
-        print(f"Warning: bootstrap_se_weighted: only {len(atts)} of {n_reps} replicates completed")
+    while len(atts) < n_reps:
+        ind = np.random.choice(N, size=N, replace=True)
+        val = theta(ind)
+        if not np.isnan(val):
+            atts.append(val)
 
     atts = np.array(atts)
-    if len(atts) == 0:
-        return np.nan
-    n = len(atts)
-    return np.sqrt((n-1)/n) * np.std(atts, ddof=1)
+    return np.sqrt((n_reps - 1) / n_reps) * np.std(atts, ddof=1)
 
-def bootstrap_se(data_ref, weights=None, n_reps=50):
+
+def _bootstrap_se_reestimate_weighted(data_ref, treated_weights, n_reps=50):
+    """Fallback: re-estimate weights each bootstrap rep (no fixed weights provided)."""
+    treated_units_orig = list(np.unique(data_ref[data_ref.treated == 1].unit))
+    tw_dict = {u: w for u, w in zip(treated_units_orig, treated_weights)}
     unique_units = np.unique(data_ref.unit)
     N = len(unique_units)
-    control_units_orig = list(np.unique(data_ref[data_ref.treated == 0].unit))
-    omega = weights["omega"][0] if weights is not None else None
-    omega_dict = dict(zip(control_units_orig, omega)) if omega is not None else None
-
-    def get_omega_b(sampled):
-        if omega_dict is None:
-            return None
-        control_ids = [u for u in sampled if u in set(control_units_orig)]
-        return sum_normalize(np.array([omega_dict[u] for u in control_ids]))
 
     def draw():
         sampled = np.random.choice(unique_units, replace=True, size=N)
@@ -123,37 +97,113 @@ def bootstrap_se(data_ref, weights=None, n_reps=50):
         merged = data_ref.merge(sample_df, on='unit')
         merged['unit'] = merged['unit'].astype(str) + '__' + merged['idx'].astype(str)
         merged = merged.drop(columns=['idx'])
-        return merged, sampled
+        treated_ids = [u for u in sampled if u in set(treated_units_orig)]
+        tw_b = sum_normalize(np.array([tw_dict[u] for u in treated_ids]))
+        return merged, tw_b
 
     atts = []
     attempts = 0
     max_attempts = n_reps * 10
-    failures = 0
-
     while len(atts) < n_reps and attempts < max_attempts:
         attempts += 1
         try:
-            sampled_df, sampled = draw()
+            sampled_df, tw_b = draw()
             if len(np.unique(sampled_df.treatment)) != 2:
                 continue
-            omega_b = get_omega_b(sampled)
-            weights_b = {"omega": [omega_b], "lambda": weights["lambda"]} if weights is not None and omega_b is not None else None
             att = sdid(sampled_df, "unit", "time", "treatment", "outcome",
-                      weights=weights_b)["att"]
+                      treated_weights=tw_b)["att"]
             atts.append(att)
-        except Exception as e:
-            failures += 1
-
-    if failures > 0:
-        print(f"Warning: bootstrap_se: {failures} of {attempts} attempts failed")
-    if len(atts) < n_reps:
-        print(f"Warning: bootstrap_se: only {len(atts)} of {n_reps} replicates completed")
+        except Exception:
+            continue
 
     atts = np.array(atts)
     if len(atts) == 0:
         return np.nan
     n = len(atts)
-    return np.sqrt((n-1)/n) * np.std(atts, ddof=1)
+    return np.sqrt((n - 1) / n) * np.std(atts, ddof=1)
+
+
+def bootstrap_se(data_ref, weights=None, n_reps=50):
+    """
+    Fixed-weight bootstrap SE (Algorithm 2, unweighted).
+    Mirrors R: build Y matrix once, resample row indices, compute ATT via matrix product.
+    """
+    if weights is None:
+        return _bootstrap_se_reestimate(data_ref, n_reps=n_reps)
+
+    omega = weights["omega"][0]
+    lambda_pre = weights["lambda"][0]
+
+    sorted_data = data_ref.sort_values(["treated", "unit", "time"])
+    tyear_vals = sorted(sorted_data.loc[sorted_data["tyear"] > 0, "tyear"].unique())
+    treatment_year = tyear_vals[0]
+
+    tyear_data = sorted_data[sorted_data.tyear.isin([0, treatment_year])]
+    Y = tyear_data.pivot_table(values="outcome", index="unit", columns="time", sort=False).to_numpy()
+    N = Y.shape[0]
+    N0 = len(omega)
+    N1 = N - N0
+    T0 = len(lambda_pre)
+    T1 = Y.shape[1] - T0
+    lmd = np.concatenate([-lambda_pre, np.full(T1, 1 / T1)])
+
+    def theta(ind):
+        control_ind = np.sort(ind[ind < N0])
+        treated_ind = np.sort(ind[ind >= N0])
+        if len(control_ind) == 0 or len(treated_ind) == 0:
+            return np.nan
+
+        omega_b = sum_normalize(omega[control_ind])
+        N1_b = len(treated_ind)
+        tw_b = np.full(N1_b, 1 / N1_b)
+
+        Y_boot = Y[np.concatenate([control_ind, treated_ind]), :]
+        omg = np.concatenate([-omega_b, tw_b])
+        return omg @ Y_boot @ lmd
+
+    atts = []
+    while len(atts) < n_reps:
+        ind = np.random.choice(N, size=N, replace=True)
+        val = theta(ind)
+        if not np.isnan(val):
+            atts.append(val)
+
+    atts = np.array(atts)
+    return np.sqrt((n_reps - 1) / n_reps) * np.std(atts, ddof=1)
+
+
+def _bootstrap_se_reestimate(data_ref, n_reps=50):
+    """Fallback: re-estimate weights each bootstrap rep (no fixed weights provided)."""
+    unique_units = np.unique(data_ref.unit)
+    N = len(unique_units)
+
+    def draw():
+        sampled = np.random.choice(unique_units, replace=True, size=N)
+        sample_df = pd.DataFrame({'unit': sampled, 'idx': np.arange(N)})
+        merged = data_ref.merge(sample_df, on='unit')
+        merged['unit'] = merged['unit'].astype(str) + '__' + merged['idx'].astype(str)
+        merged = merged.drop(columns=['idx'])
+        return merged
+
+    atts = []
+    attempts = 0
+    max_attempts = n_reps * 10
+    while len(atts) < n_reps and attempts < max_attempts:
+        attempts += 1
+        try:
+            sampled_df = draw()
+            if len(np.unique(sampled_df.treatment)) != 2:
+                continue
+            att = sdid(sampled_df, "unit", "time", "treatment", "outcome")["att"]
+            atts.append(att)
+        except Exception:
+            continue
+
+    atts = np.array(atts)
+    if len(atts) == 0:
+        return np.nan
+    n = len(atts)
+    return np.sqrt((n - 1) / n) * np.std(atts, ddof=1)
 
 def placebo_se_weighted(data_ref, treated_weights, n_reps=50, placebo_weights="uniform"):
     """
@@ -495,4 +545,3 @@ class Variance:
                 se = jackknife_se(data_ref, time_break, self.att, weights)
         self.se = se
         return self
-
